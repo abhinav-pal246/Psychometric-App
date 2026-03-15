@@ -39,8 +39,13 @@ export default function Hero() {
   const startX = useRef(0);
   const { w, h } = useWindowSize();
 
-  const maxCard = w < 640 ? 300 : w < 1024 ? 400 : w < 1440 ? 440 : 520;
-  const cardHeight = Math.min(h * 0.48, maxCard);
+  /* ---- Card sizing ----
+     Phone:  taller cards (maxCard 360, ratio 0.50) but everything fits
+     iPad:   taller cards (maxCard 460, ratio 0.50)
+     Desktop: unchanged */
+  const maxCard = w < 640 ? 360 : w < 1024 ? 460 : w < 1440 ? 440 : 520;
+  const heightRatio = w < 640 ? 0.50 : w < 1024 ? 0.50 : 0.48;
+  const cardHeight = Math.min(h * heightRatio, maxCard);
   const cardWidth = w < 640 ? cardHeight * 0.75 : cardHeight * 0.7;
   const inactiveHeight = cardHeight - 30;
   const gap = w < 640 ? cardWidth * 0.85 : cardWidth + 30;
@@ -61,16 +66,16 @@ export default function Hero() {
   };
 
   return (
-    <div className="h-screen font-oswald bg-gradient-to-b from-[#E8DFD0] via-[#F0E9DD] to-[#F5F0E8] flex flex-col items-center overflow-hidden pt-20">
+    <div className="h-screen font-oswald bg-gradient-to-b from-[#E8DFD0] via-[#F0E9DD] to-[#F5F0E8] flex flex-col items-center overflow-hidden pt-16 sm:pt-20">
 
-      {/* Top text section */}
-      <div className="w-full max-w-3xl px-6 pt-6 sm:pt-8 text-center shrink-0">
+      {/* Top text section — tighter vertical spacing on small screens */}
+      <div className="w-full max-w-3xl px-6 pt-3 sm:pt-6 lg:pt-8 text-center shrink-0">
         <p className="text-[#4A4540] text-xs sm:text-sm lg:text-base xl:text-lg leading-relaxed">
           Challenge your friends and family with our Quiz app, let's see who comes out on top as the ultimate quiz champion, and earns the bragging rights!
         </p>
 
         {/* Upgrade banner */}
-        <div className="mt-4 flex items-center justify-between bg-white/60 backdrop-blur-sm rounded-2xl px-4 py-2.5 sm:px-5 sm:py-3 lg:px-6 lg:py-4">
+        <div className="mt-3 sm:mt-4 flex items-center justify-between bg-white/60 backdrop-blur-sm rounded-2xl px-4 py-2 sm:px-5 sm:py-3 lg:px-6 lg:py-4">
           <div className="flex items-center gap-2.5 lg:gap-3">
             <span className="text-xl sm:text-2xl lg:text-3xl">👑</span>
             <div className="text-left">
@@ -84,13 +89,13 @@ export default function Hero() {
         </div>
 
         {/* Section title */}
-        <h2 className="mt-5 text-left font-bold text-lg sm:text-xl lg:text-2xl xl:text-3xl text-[#2D2A26]">
+        <h2 className="mt-3 sm:mt-5 text-left font-bold text-lg sm:text-xl lg:text-2xl xl:text-3xl text-[#2D2A26]">
           Popular Game 🔥
         </h2>
       </div>
 
-      {/* Spacer — pushes cards down on mobile */}
-      <div className="flex-1 sm:flex-none" />
+      {/* Flexible spacer — distributes remaining space evenly */}
+      <div className="flex-1 min-h-1" />
 
       {/* Card carousel */}
       <div
@@ -158,8 +163,11 @@ export default function Hero() {
         })}
       </div>
 
-      {/* Navigation arrows */}
-      <div className="flex gap-4 py-5 shrink-0">
+      {/* Flexible spacer — keeps arrows from hugging cards */}
+      <div className="flex-1 min-h-1" />
+
+      {/* Navigation arrows — always visible above bottom edge */}
+      <div className="flex gap-4 pb-6 sm:pb-8 pt-2 shrink-0">
         <button
           onClick={() => setActive(Math.max(0, active - 1))}
           className="w-9 h-9 sm:w-10 sm:h-10 lg:w-12 lg:h-12 rounded-full bg-black/10 flex items-center justify-center hover:bg-black/20 transition-colors"

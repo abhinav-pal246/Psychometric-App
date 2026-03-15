@@ -1,19 +1,51 @@
+import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import viteLogo from "/vite.svg";
 import "./styles.css";
-import Footer from "./components/Footer.jsx"; // ✅ Correct import
 import Hero from "./components/hero.jsx";
+import Navbar from "./components/Navbar.jsx";
 
-import { FaInstagram, FaLinkedin, FaWeixin, FaBars } from "react-icons/fa";
 function App() {
   const [count, setCount] = useState(0);
+const router = createBrowserRouter([
+    {
+      path: "/",
+      element: (
+        <>
+         
+          <Navbar />
+          <Hero/>
+        </>
+      ),
+    },
+    {
+      path: "/PSS-10",
+      element: (
+        <>
+          
+        </>
+      ),
+    },
+    {
+      path: "/contactus",
+      element: (
+        <>
+          
+        </>
+      ),
+    },
+    {
+      path: "/blog",
+      element: (
+        <>
+         
+        </>
+      ),
+    },
+  ]);
 
   return (
-    <div className="App">
-      <Hero/>
-      
-    
+    <div>
+      <RouterProvider router={router} />
     </div>
   );
 }
