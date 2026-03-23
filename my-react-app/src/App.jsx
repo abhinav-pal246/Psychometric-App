@@ -1,11 +1,12 @@
 import { createBrowserRouter, RouterProvider } from "react-router-dom";
-import { useState } from "react";
 import "./styles.css";
 import Hero from "./components/hero.jsx";
 import Navbar from "./components/Navbar.jsx";
+import PSSQuiz from "./components/PSSQuiz.jsx";
+import Quizpage from "./components/Quizpage.jsx";
+import { AuthProvider } from "./context/AuthContext.jsx";
 
 function App() {
-  const [count, setCount] = useState(0);
 const router = createBrowserRouter([
     {
       path: "/",
@@ -21,15 +22,15 @@ const router = createBrowserRouter([
       path: "/PSS-10",
       element: (
         <>
-          
+          <PSSQuiz/>
         </>
       ),
     },
     {
-      path: "/contactus",
+      path: "/PSSQuiz-Begin",
       element: (
         <>
-          
+          <Quizpage/>
         </>
       ),
     },
@@ -44,9 +45,9 @@ const router = createBrowserRouter([
   ]);
 
   return (
-    <div>
+    <AuthProvider>
       <RouterProvider router={router} />
-    </div>
+    </AuthProvider>
   );
 }
 

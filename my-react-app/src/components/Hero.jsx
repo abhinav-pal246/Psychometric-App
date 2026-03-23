@@ -5,6 +5,7 @@ const cards = [
     tag: "Science",
     title: "Science",
     color: "bg-[#F2C94C]",
+    link: "/quiz/science",
     description:
       "Dive into the wonders of science with fun quizzes that challenge your knowledge from atoms to galaxies!",
   },
@@ -12,6 +13,7 @@ const cards = [
     tag: "PSS-10",
     title: "Technology",
     color: "bg-[#E84C3D]",
+    link: "/PSS-10",
     description:
       "Explore the world of technology with the interesting Technology Quiz and see ",
   },
@@ -19,6 +21,7 @@ const cards = [
     tag: "Science",
     title: "Science",
     color: "bg-[#2A9D8F]",
+    link: "/quiz/science-2",
     description:
       "Explore the fascinating realm of science with thrilling quizzes that test your curiosity and intellect!",
   },
@@ -143,10 +146,14 @@ export default function Hero() {
                 </p>
               </div>
 
-              {/* Attempt Now button */}
-              <button className="w-full bg-white text-[#2D2A26] font-bold text-sm py-2.5 rounded-full hover:bg-white/90 transition-colors shadow-md">
+              {/* Attempt Now link */}
+              <a
+                href={card.link}
+                onClick={(e) => e.stopPropagation()}
+                className="block w-full bg-white text-[#2D2A26] font-bold text-sm py-2.5 rounded-full hover:bg-white/90 transition-colors shadow-md text-center"
+              >
                 Attempt Now
-              </button>
+              </a>
 
               <div className="flex gap-1.5 mt-3 justify-center">
                 {cards.map((_, j) => (
