@@ -10,28 +10,62 @@ import sarvamRoutes from "./sarvamRoutes.js";
 
 
 const app = express();
-const port = 3000;
+const port = 3000; //Standard Express app on port 3000.
+
+
 const CLIENT_URL = "http://localhost:5173";
 
-// ── Middleware ──────────────────────────────────────────────
+// ====== Middleware==========================================================================================================
+//-----------------------------------------------------------------------------------------------------------------------------
+//origin = protocol + domain + port
+// CORS (Cross-Origin Resource Sharing) is the server's way of telling the browser:
+// "Hey, I trust requests coming from this other origin — let them through."
+// By default, browsers block JavaScript from making requests to a different origin.
+//  This is called the Same-Origin Policy — a browser security rule.
 app.use(
   cors({
     origin: CLIENT_URL,
-    credentials: true,
+    credentials: true, //allowing cookirs from to be sent
   }),
 );
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
+
+//--------------------------------------------------------------------------------------------------------------------------- 
+// req.body      // data sent in the request body (POST/PUT) It holds the data the client sent in the body of the request.
+// req.params    // URL parameters  → /user/:id  → req.params.id
+// req.user      // logged in user (added by Passport)
+//these lines act as active translators (or parsers) for every single piece of data that comes into your server.
+//without these two lines req.body wont work
+app.use(express.urlencoded({ extended: true })); //This middleware acts as an HTML form parser.
+app.use(express.json()); //This middleware acts as a JSON parser. bytes to -> { questionId: 3, answer: 2 }
+//-----------------------------------------------------------------------------------------------------------------------------
+
+//express-session stores session data server-side. The session ID is sent to the browser as a cookie.
+//  This is what keeps users "logged in" between requests. Session middleware
+
+// The key inside your .env file (GOOGLE_CLIENT_SECRET or SESSION_SECRET) is a static, unchanging password that belongs exclusively to your server.
+// There is only one secret key.
+// It is never given to User A or User B.
+
+//Secret_Key is the stamp which autharise the random generate key by the session 
+
+
+// The server's internal memory looks something like this:
+// {
+    //"ID_SecretKey"
+//   "999_AAA": { user_id: 1, name: "User A", expires: "Tomorrow" },
+//   "111_BBB": { user_id: 2, name: "User B", expires: "Tomorrow" }
+// }
+
 
 app.use(
-  session({
-    secret: process.env.GOOGLE_CLIENT_SECRET,
-    resave: false,
-    saveUninitialized: false,
+  session({ // session create ID , before sending id to the client browser , it attach secretKey on the end of id as stam but stores ID only in server's ram
+    secret: process.env.GOOGLE_CLIENT_SECRET,  //The Stamp is the mathematical signature. its  mathematical signature not random, The key is random but remain static for project , using the key a mathematical operation is applied whihc generates this secret stamp
+    resave: false, //If the user's session data didn't change during their visit, don't bother saving a new copy of it back into the server's memory
+    saveUninitialized: false, //Do not save this empty session into our memory, and do not send a cookie to the user's browser, until we actually put some data in it (like when they log in)."
     cookie: { maxAge: 1000 * 60 * 60 * 24 },
   }),
 );
-
+//-------------------------------------------------------------------------------------------------------------------------
 app.use(passport.initialize());
 app.use(passport.session());
 
@@ -198,3 +232,30 @@ passport.use(
 app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+// // Frontend sends this: with api url || fetch is what sends the request from the browser
+// fetch("/api/quiz/submit", {
+//   method: "POST",
+//   headers: { "Content-Type": "application/json" },
+//   body: JSON.stringify({ questionId: 3, answer: 2 })
+// })
+
+// // Backend receives this: ||  req is what receives that request on the server
+// app.post("/api/quiz/submit", (req, res) => {
+//   console.log(req.body)
+//   // → { questionId: 3, answer: 2 }
+// })
+// fetch()  =  you writing and posting the letter
+// req      =  the letter after it arrives at the destination
