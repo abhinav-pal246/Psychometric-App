@@ -102,6 +102,7 @@ export default function Quizpage() {
   const streamRef = useRef(null);
 
   const [error, setError] = useState("");
+  const [submitted, setSubmitted] = useState(false);
 
   const answered = Object.keys(responses).filter((k) => responses[k].trim() !== "").length;
   const progress = ((current + 1) / questions.length) * 100;
@@ -247,7 +248,46 @@ export default function Quizpage() {
     else startListening();
   };
 
+  // ── Submit ──
+  const handleSubmit = async () => {
+    if (answered !== questions.length) return;
+    try {
+      const res = await fetch("/api/quiz/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ responses }),
+      });
+      if (!res.ok) throw new Error("Submission failed");
+      setSubmitted(true);
+    } catch (err) {
+      console.error(err);
+      showError("Failed to submit. Please try again.");
+    }
+  };
+
   // ── Render ──
+  if (submitted) {
+    return (
+      <div
+        role="main"
+        aria-live="polite"
+        className="min-h-screen bg-gradient-to-br from-slate-50 via-teal-50/30 to-cyan-50/40 flex flex-col items-center justify-center px-5 font-['Outfit',_sans-serif]"
+      >
+        <div className="bg-white rounded-3xl shadow-xl shadow-teal-100/30 border border-teal-100/50 p-10 max-w-md w-full text-center">
+          <div className="w-16 h-16 rounded-full bg-gradient-to-br from-teal-500 to-cyan-600 flex items-center justify-center mx-auto mb-6 shadow-lg shadow-teal-200/50">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          </div>
+          <h2 className="text-2xl font-bold text-slate-800 mb-3 font-['Fraunces',_serif]">Quiz Submitted!</h2>
+          <p className="text-slate-500 text-sm leading-relaxed">
+            Thank you for completing the Perceived Stress Scale assessment. Your responses have been recorded.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-teal-50/30 to-cyan-50/40 flex flex-col font-['Outfit',_sans-serif]">
       <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&display=swap" rel="stylesheet" />
@@ -459,11 +499,15 @@ export default function Quizpage() {
             </button>
 
             {isLast ? (
-              <button className={`flex items-center gap-2 px-7 py-3 rounded-xl text-sm font-bold transition-all duration-300 ${
-                answered === questions.length
-                  ? "bg-gradient-to-r from-teal-500 to-cyan-600 text-white shadow-lg shadow-teal-200/50 hover:shadow-xl hover:scale-105"
-                  : "bg-slate-100 text-slate-400 cursor-not-allowed"
-              }`}>
+              <button
+                onClick={handleSubmit}
+                disabled={answered !== questions.length}
+                aria-label={answered !== questions.length ? `Submit quiz, ${questions.length - answered} questions remaining` : "Submit quiz"}
+                className={`flex items-center gap-2 px-7 py-3 rounded-xl text-sm font-bold transition-all duration-300 ${
+                  answered === questions.length
+                    ? "bg-gradient-to-r from-teal-500 to-cyan-600 text-white shadow-lg shadow-teal-200/50 hover:shadow-xl hover:scale-105"
+                    : "bg-slate-100 text-slate-400 cursor-not-allowed"
+                }`}>
                 Submit
               </button>
             ) : (

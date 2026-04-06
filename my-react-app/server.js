@@ -228,6 +228,31 @@ passport.use(
   ),
 );
 
+// ── Quiz Submit ────────────────────────────────────────────
+app.post("/api/quiz/submit", async (req, res) => {
+  const { responses } = req.body;
+  const userId = req.isAuthenticated() ? req.user.id : null;
+
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS quiz_responses (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT,
+        responses JSONB NOT NULL,
+        submitted_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    await db.query(
+      "INSERT INTO quiz_responses (user_id, responses) VALUES ($1, $2)",
+      [userId, JSON.stringify(responses)]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Quiz submit error:", err);
+    res.status(500).json({ error: "Failed to save responses" });
+  }
+});
+
 // ── Start Server ───────────────────────────────────────────
 app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);
