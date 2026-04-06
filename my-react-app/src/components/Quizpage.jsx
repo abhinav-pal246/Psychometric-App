@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 
 const questions = [
   "In the last month, how often have you been upset because of something that happened unexpectedly?",
@@ -93,8 +93,8 @@ function StopIcon({ size = 14 }) {
   );
 }
 
-// ── TTS Helper ─────────────────────────────────────────────
-async function speakText(text) {
+// ── TTS Helper (returns audio element so it can be stopped) ──
+async function speakText(text, audioRef) {
   const res = await fetch("/api/sarvam/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -111,11 +111,22 @@ async function speakText(text) {
   const url = URL.createObjectURL(blob);
   const audio = new Audio(url);
 
+  if (audioRef) audioRef.current = audio;
+
   return new Promise((resolve) => {
-    audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
-    audio.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+    audio.onended = () => { URL.revokeObjectURL(url); if (audioRef) audioRef.current = null; resolve(); };
+    audio.onerror = () => { URL.revokeObjectURL(url); if (audioRef) audioRef.current = null; resolve(); };
     audio.play();
   });
+}
+
+// ── Stop any playing TTS audio ──
+function stopTTS(audioRef) {
+  if (audioRef.current) {
+    audioRef.current.pause();
+    audioRef.current.currentTime = 0;
+    audioRef.current = null;
+  }
 }
 
 // ── Component ──────────────────────────────────────────────
@@ -124,6 +135,7 @@ export default function Quizpage() {
   const [current, setCurrent] = useState(0);
   const [direction, setDirection] = useState(1);
 
+  const [isTTSPlaying, setIsTTSPlaying] = useState(false);
   const [playingQuestion, setPlayingQuestion] = useState(false);
   const [playingOptions, setPlayingOptions] = useState(false);
 
@@ -138,7 +150,18 @@ export default function Quizpage() {
   // ── Submit state ──
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
-  const [submitResult, setSubmitResult] = useState(null); // { total_score, attemptId }
+  const [submitResult, setSubmitResult] = useState(null);
+
+  // ── Audio ref for stopping TTS ──
+  const ttsAudioRef = useRef(null);
+
+  // ── Click detection refs ──
+  const clickCountRef = useRef(0);
+  const clickTimerRef = useRef(null);
+
+  // ── Track if question announcement is in progress ──
+  const announcementRef = useRef(null);
+  const prevQuestionRef = useRef(current);
 
   const answered = Object.keys(responses).filter((k) => responses[k].trim() !== "").length;
   const progress = ((current + 1) / questions.length) * 100;
@@ -164,47 +187,341 @@ export default function Quizpage() {
   const resetAudio = () => {
     setPlayingQuestion(false);
     setPlayingOptions(false);
+    setIsTTSPlaying(false);
+    stopTTS(ttsAudioRef);
     stopRecordingSilently();
   };
 
-  const goNext = () => { if (!isLast) { setDirection(1); resetAudio(); setCurrent((p) => p + 1); } };
-  const goPrev = () => { if (!isFirst) { setDirection(-1); resetAudio(); setCurrent((p) => p - 1); } };
+  const goNext = useCallback(() => {
+    setCurrent((prev) => {
+      if (prev < questions.length - 1) {
+        setDirection(1);
+        resetAudio();
+        return prev + 1;
+      }
+      return prev;
+    });
+  }, []);
+
+  const goPrev = useCallback(() => {
+    setCurrent((prev) => {
+      if (prev > 0) {
+        setDirection(-1);
+        resetAudio();
+        return prev - 1;
+      }
+      return prev;
+    });
+  }, []);
 
   const showError = (msg) => {
     setError(msg);
     setTimeout(() => setError(""), 5000);
   };
 
-  // ── TTS: Question ──
+  // ══════════════════════════════════════════════════════════
+  // FEATURE 1: Announce question number on switch via Sarvam TTS
+  // On last question, announce "This is the last question"
+  // ══════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (prevQuestionRef.current === current && current === 0 && prevQuestionRef.current === 0) {
+      // Initial mount — announce question 1
+    } else if (prevQuestionRef.current === current) {
+      return; // no change
+    }
+    prevQuestionRef.current = current;
+
+    const announceQuestion = async () => {
+      // Stop any ongoing TTS
+      stopTTS(ttsAudioRef);
+
+      let announcement;
+      if (current === questions.length - 1) {
+        announcement = `Question ${current + 1}. This is the last question.`;
+      } else {
+        announcement = `Question ${current + 1}.`;
+      }
+
+      try {
+        await speakText(announcement, ttsAudioRef);
+      } catch (err) {
+        console.error("Question announcement failed:", err);
+      }
+    };
+
+    announceQuestion();
+  }, [current]);
+
+  // ══════════════════════════════════════════════════════════
+  // FEATURE 2: Keyboard left/right arrow to change question
+  // ══════════════════════════════════════════════════════════
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Don't intercept if user is typing in textarea
+      if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") return;
+
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        goPrev();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        goNext();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [goNext, goPrev]);
+
+  // ══════════════════════════════════════════════════════════
+  // FEATURE 3: Single click → TTS read question+options+answer / stop if playing
+  // FEATURE 4: Double click → STT to take voice answer
+  // FEATURE 5: Triple click → Clear the submitted answer
+  // ══════════════════════════════════════════════════════════
+  const handleCardClick = useCallback((e) => {
+    // Don't trigger on button clicks, textarea, or interactive elements
+    if (
+      e.target.tagName === "BUTTON" ||
+      e.target.tagName === "TEXTAREA" ||
+      e.target.tagName === "INPUT" ||
+      e.target.tagName === "SVG" ||
+      e.target.tagName === "path" ||
+      e.target.tagName === "polyline" ||
+      e.target.tagName === "rect" ||
+      e.target.tagName === "polygon" ||
+      e.target.tagName === "line" ||
+      e.target.tagName === "circle" ||
+      e.target.closest("button") ||
+      e.target.closest("textarea")
+    ) {
+      return;
+    }
+
+    clickCountRef.current += 1;
+
+    if (clickTimerRef.current) {
+      clearTimeout(clickTimerRef.current);
+    }
+
+    clickTimerRef.current = setTimeout(() => {
+      const clicks = clickCountRef.current;
+      clickCountRef.current = 0;
+
+      if (clicks === 1) {
+        handleSingleClick();
+      } else if (clicks === 2) {
+        handleDoubleClick();
+      } else if (clicks >= 3) {
+        handleTripleClick();
+      }
+    }, 350);
+  }, [current, responses, isTTSPlaying, isListening]);
+
+  // ── SINGLE CLICK: Read question + options + user's answer via TTS / Stop if playing ──
+  const handleSingleClick = async () => {
+    // If TTS is currently playing, stop it
+    if (ttsAudioRef.current) {
+      stopTTS(ttsAudioRef);
+      setIsTTSPlaying(false);
+      setPlayingQuestion(false);
+      setPlayingOptions(false);
+      return;
+    }
+
+    setIsTTSPlaying(true);
+    setPlayingQuestion(true);
+
+    try {
+      // Read question
+      await speakText(`Question ${current + 1}. ${questions[current]}`, ttsAudioRef);
+
+      // Check if stopped mid-way
+      if (!ttsAudioRef.current && !document.hidden) {
+        // Audio finished naturally, continue to options
+      }
+
+      setPlayingQuestion(false);
+      setPlayingOptions(true);
+
+      // Read options
+      const optionsText = options.map((o, i) => `Option ${i}: ${o}`).join(". ");
+      await speakText(optionsText, ttsAudioRef);
+
+      setPlayingOptions(false);
+
+      // Read user's answer if they have one
+      const userAnswer = responses[current];
+      if (userAnswer && userAnswer.trim() !== "") {
+        const parsed = parseAnswerToValue(userAnswer);
+        if (parsed !== null) {
+          await speakText(`Your answer is: ${options[parsed]}`, ttsAudioRef);
+        } else {
+          await speakText(`Your current answer is: ${userAnswer}`, ttsAudioRef);
+        }
+      }
+    } catch (err) {
+      console.error("TTS error:", err);
+      showError("Failed to play audio.");
+    }
+
+    setIsTTSPlaying(false);
+    setPlayingQuestion(false);
+    setPlayingOptions(false);
+  };
+
+  // ── DOUBLE CLICK: Start STT, auto-stop on valid answer, reset on invalid ──
+  const handleDoubleClick = async () => {
+    // If already listening, ignore
+    if (isListening || sttLoading) return;
+
+    // Stop any TTS
+    stopTTS(ttsAudioRef);
+    setIsTTSPlaying(false);
+    setPlayingQuestion(false);
+    setPlayingOptions(false);
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
+
+      const recorder = new MediaRecorder(stream, { mimeType });
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      recorder.start(250);
+      setIsListening(true);
+
+      // Auto-stop after 6 seconds of recording
+      setTimeout(async () => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+          await autoStopAndValidate();
+        }
+      }, 6000);
+    } catch (err) {
+      console.error(err);
+      showError("Microphone access denied. Please allow mic permissions.");
+    }
+  };
+
+  // Auto-stop recording and validate the answer
+  const autoStopAndValidate = async () => {
+    if (!mediaRecorderRef.current || mediaRecorderRef.current.state === "inactive") {
+      setIsListening(false);
+      return;
+    }
+
+    setIsListening(false);
+    setSttLoading(true);
+
+    try {
+      const blob = await new Promise((resolve) => {
+        mediaRecorderRef.current.onstop = () => {
+          resolve(new Blob(audioChunksRef.current, { type: "audio/webm" }));
+        };
+        mediaRecorderRef.current.stop();
+      });
+
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+      mediaRecorderRef.current = null;
+
+      const formData = new FormData();
+      formData.append("file", blob, "recording.webm");
+
+      const res = await fetch("/api/sarvam/stt", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) throw new Error("STT request failed");
+
+      const data = await res.json();
+      if (data.transcript) {
+        const transcript = data.transcript.trim();
+        const parsed = parseAnswerToValue(transcript);
+
+        if (parsed !== null) {
+          // Valid answer — set it and stop
+          setResponses((prev) => ({ ...prev, [current]: options[parsed] }));
+          // Announce confirmation
+          try {
+            await speakText(`Answer recorded: ${options[parsed]}`, ttsAudioRef);
+          } catch {}
+        } else {
+          // Invalid answer — reset and announce error
+          setResponses((prev) => ({ ...prev, [current]: "" }));
+          try {
+            await speakText("Answer was not from the following options. Please try answering again.", ttsAudioRef);
+          } catch {}
+        }
+      }
+    } catch (err) {
+      console.error(err);
+      showError("Failed to transcribe. Please try again.");
+    }
+
+    setSttLoading(false);
+  };
+
+  // ── TRIPLE CLICK: Clear the submitted answer ──
+  const handleTripleClick = async () => {
+    setResponses((prev) => ({ ...prev, [current]: "" }));
+
+    // Stop any ongoing audio/recording
+    stopTTS(ttsAudioRef);
+    setIsTTSPlaying(false);
+    stopRecordingSilently();
+
+    // Announce that the answer has been cleared
+    try {
+      await speakText("Answer cleared.", ttsAudioRef);
+    } catch {}
+  };
+
+  // ── TTS: Question (button) ──
   const handleTTSQuestion = async () => {
     if (playingQuestion) return;
     setPlayingQuestion(true);
     setPlayingOptions(false);
+    setIsTTSPlaying(true);
     try {
-      await speakText(questions[current]);
+      await speakText(questions[current], ttsAudioRef);
     } catch (err) {
       console.error(err);
       showError("Failed to play question audio.");
     }
     setPlayingQuestion(false);
+    setIsTTSPlaying(false);
   };
 
-  // ── TTS: Options ──
+  // ── TTS: Options (button) ──
   const handleTTSOptions = async () => {
     if (playingOptions) return;
     setPlayingOptions(true);
     setPlayingQuestion(false);
+    setIsTTSPlaying(true);
     try {
       const text = options.map((o, i) => `Option ${i}: ${o}`).join(". ");
-      await speakText(text);
+      await speakText(text, ttsAudioRef);
     } catch (err) {
       console.error(err);
       showError("Failed to play options audio.");
     }
     setPlayingOptions(false);
+    setIsTTSPlaying(false);
   };
 
-  // ── STT: Start ──
+  // ── STT: Toggle (button) ──
   const startListening = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -230,7 +547,6 @@ export default function Quizpage() {
     }
   };
 
-  // ── STT: Stop → transcribe ──
   const stopAndTranscribe = async () => {
     if (!mediaRecorderRef.current || mediaRecorderRef.current.state === "inactive") {
       setIsListening(false);
@@ -286,7 +602,6 @@ export default function Quizpage() {
 
   // ── Submit ─────────────────────────────────────────────────
   const handleSubmit = async () => {
-    // Step 1: Parse all 10 text responses into numbers
     const responsesArray = [];
     for (let i = 0; i < questions.length; i++) {
       const rawText = (responses[i] || "").trim();
@@ -296,27 +611,25 @@ export default function Quizpage() {
         showError(
           `Question ${i + 1}: "${rawText}" is not a valid answer. Please type or say: Never, Almost Never, Sometimes, Fairly Often, or Very Often.`
         );
-        setCurrent(i); // jump to the problematic question
+        setCurrent(i);
         return;
       }
 
       responsesArray.push({
-        question_id: i + 1,         // 1-indexed for DB
-        answer: value,              // 0-4 numeric answer
-        score: calculateScore(i, value), // reversed for Q4,5,7,8
+        question_id: i + 1,
+        answer: value,
+        score: calculateScore(i, value),
       });
     }
 
-    // Step 2: Sum all scores → total
     const totalScore = responsesArray.reduce((sum, r) => sum + r.score, 0);
 
-    // Step 3: Send to Express backend
     try {
       setSubmitting(true);
       const res = await fetch("/api/quiz/submit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include", // sends session cookie → backend knows who user is
+        credentials: "include",
         body: JSON.stringify({
           responses: responsesArray,
           total_score: totalScore,
@@ -423,6 +736,16 @@ export default function Quizpage() {
         </div>
       </header>
 
+      {/* Accessibility hint banner */}
+      <div className="max-w-2xl mx-auto w-full px-5 pt-4">
+        <div className="bg-indigo-50/70 border border-indigo-100 rounded-xl px-4 py-2.5 text-xs text-indigo-500 font-medium flex items-center gap-2">
+          <span>⌨</span>
+          <span>
+            <strong>Shortcuts:</strong> Arrow keys = navigate  |  Single click = read aloud / stop  |  Double click = speak answer  |  Triple click = clear answer
+          </span>
+        </div>
+      </div>
+
       {/* Main */}
       <main className="flex-1 flex flex-col items-center justify-center px-5 py-10">
         <div className="w-full max-w-2xl">
@@ -443,8 +766,28 @@ export default function Quizpage() {
             ))}
           </div>
 
-          {/* Card */}
-          <div key={current} className="bg-white rounded-3xl shadow-xl shadow-teal-100/30 border border-teal-100/50 overflow-hidden transition-all duration-300">
+          {/* Card — click handler for single/double/triple click */}
+          <div
+            key={current}
+            onClick={handleCardClick}
+            className="bg-white rounded-3xl shadow-xl shadow-teal-100/30 border border-teal-100/50 overflow-hidden transition-all duration-300 cursor-pointer select-none"
+            role="region"
+            aria-label={`Question ${current + 1} of ${questions.length}`}
+          >
+
+            {/* TTS Playing Indicator */}
+            {isTTSPlaying && (
+              <div className="bg-teal-500 text-white text-xs font-semibold text-center py-1.5 flex items-center justify-center gap-2">
+                <span className="animate-pulse">●</span> Reading aloud — click to stop
+              </div>
+            )}
+
+            {/* Listening Indicator */}
+            {isListening && (
+              <div className="bg-rose-500 text-white text-xs font-semibold text-center py-1.5 flex items-center justify-center gap-2">
+                <span className="animate-pulse">●</span> Listening for your answer…
+              </div>
+            )}
 
             {/* QUESTION SECTION */}
             <div className="px-7 pt-7 pb-5">
@@ -452,7 +795,10 @@ export default function Quizpage() {
                 <span className="inline-flex items-center justify-center w-10 h-10 rounded-2xl bg-gradient-to-br from-teal-500 to-cyan-600 text-white font-bold text-sm shadow-lg shadow-teal-200/40">
                   {String(current + 1).padStart(2, "0")}
                 </span>
-                <span className="text-xs text-slate-400 font-medium uppercase tracking-widest">Question {current + 1} of {questions.length}</span>
+                <span className="text-xs text-slate-400 font-medium uppercase tracking-widest">
+                  Question {current + 1} of {questions.length}
+                  {isLast && <span className="ml-2 text-rose-500 font-bold">(Last Question)</span>}
+                </span>
               </div>
 
               <p className="text-lg text-slate-700 leading-relaxed font-medium mb-5 font-['Fraunces',_serif]">
