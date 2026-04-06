@@ -69,7 +69,12 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
-// ── Database ───────────────────────────────────────────────
+
+
+
+// == Database ========================================================================================================================
+
+//This block of code is just you walking up to the front door of the database building and unlocking it.
 const db = new Client({
   user: process.env.DB_USER,
   host: process.env.DB_HOST,
@@ -82,19 +87,39 @@ db.connect();
 //sarvam
 app.use("/api/sarvam", sarvamRoutes);
 
-// ── Serialize / Deserialize ────────────────────────────────
-passport.serializeUser((user, cb) => {
-  cb(null, user.id);
+// == Serialize / Deserialize ============================================================================================================
+
+// These two functions are exactly how Passport bridges the gap between your session memory (RAM) and your PostgreSQL database.
+
+//Serialize: To shrink data down into something tiny so it's easy to store
+passport.serializeUser((user, cb) => { //user:It has their name, email, Google ID, etc.
+  //null simply means "there are no errors."
+  cb(null, user.id); //Just save their tiny id string into our server's RAM
 });
 
+//Deserialize: To take that tiny piece of data and expand it back into the full, original object.
 passport.deserializeUser(async (id, cb) => {
   try {
-    const result = await db.query(
-      "SELECT * FROM oautherization WHERE id = $1",
+    // This whole object is what gets saved inside your "const result" variable
+    // {
+    //   command: 'SELECT',
+    //   rowCount: 1,
+    //   oid: null,
+    //   fields: [ ...info about the columns... ],
+    //   rows: [
+    //     { 
+    //       id: '5', 
+    //       email: 'john@email.com', 
+    //       profile_name: 'John Doe' 
+    //     }
+    //   ]
+    // }
+    const result = await db.query( //Now we are using that tiny id to ask your PostgreSQL database: "Hey, I have this ID number. Can you pull out the complete, heavy filing cabinet folder for this person?"
+      "SELECT * FROM oautherization WHERE id = $1", // its getting the info from table where row has that id of user
       [id],
     );
     if (result.rows.length > 0) {
-      cb(null, result.rows[0]);
+      cb(null, result.rows[0]); // the database will only ever find exactly one match in DB and result array will hold 1 entry at 0 index
     } else {
       cb(new Error("User not found"));
     }
@@ -104,11 +129,14 @@ passport.deserializeUser(async (id, cb) => {
 });
 
 // ── Auth Routes ─────────────────────────────────────────────
+//Route handlers
 
-// Sign In (register) — store mode in session, then redirect to Google
-app.get("/auth/google/signup", (req, res, next) => {
-  req.session.authMode = "signup";
-  passport.authenticate("google", { scope: ["profile", "email"] })(req, res, next);
+//User clicks "Sign Up" → frontend hits this URL → Express runs this function.
+//Sign In (register) — store mode in session, then redirect to Google
+app.get("/auth/google/signup", (req, res, next) => { 
+  req.session.authMode = "signup";// sesssion is a object and  it looks like {"authMode" : "signUp,"}
+  passport.authenticate("google", { scope: ["profile", "email"] })(req, res, next); //passport redirects to google signup window and handles data transfer
+  //The Two-Step Callback Process
 });
 
 // Log In — store mode in session, then redirect to Google
@@ -133,6 +161,7 @@ app.get(
     })(req, res, next);
   },
 );
+
 
 // Helper: HTML page that posts result back to the opener window and closes itself
 function popupHTML(success, message, email, name) {
@@ -178,6 +207,7 @@ app.post("/api/logout", (req, res) => {
 });
 
 // ── Google Strategy ────────────────────────────────────────
+//Strategy Checks The Database (index.js) whether the user is login or not before
 passport.use(
   "google",
   new GoogleStrategy(
@@ -227,6 +257,45 @@ passport.use(
     },
   ),
 );
+
+
+//user submitting the quiz 
+app.post("/api/quiz/submit", async (req, res) => {
+
+  // 1. Check user is logged in
+  if (!req.isAuthenticated()) {
+    return res.status(401).json({ error: "Please log in to submit the quiz." });
+  }
+
+  const userId = req.user.id;  // gmail id from session
+  const { responses, total_score } = req.body;
+
+  try {
+    // 2. Create one attempt row — stores who, when, total
+    const attempt = await db.query(
+      `INSERT INTO quizpss10_attempts (user_id, total_score) 
+       VALUES ($1, $2) RETURNING id`,
+      [userId, total_score]
+    );
+
+    const attemptId = attempt.rows[0].id;
+
+    // 3. Insert one row per question into responses table
+    for (const r of responses) {
+      await db.query(
+        `INSERT INTO quizpss10_responses (attempt_id, question_id, answer, score)
+         VALUES ($1, $2, $3, $4)`,
+        [attemptId, r.question_id, r.answer, r.score]
+      );
+    }
+
+    res.json({ success: true, attemptId, total_score });
+
+  } catch (err) {
+    console.error("Quiz submit error:", err);
+    res.status(500).json({ error: "Failed to save quiz." });
+  }
+});
 
 // ── Start Server ───────────────────────────────────────────
 app.listen(port, () => {

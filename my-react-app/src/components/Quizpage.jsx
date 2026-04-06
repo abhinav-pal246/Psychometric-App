@@ -15,7 +15,39 @@ const questions = [
 
 const options = ["Never", "Almost Never", "Sometimes", "Fairly Often", "Very Often"];
 
-// ── SVG Icons ──
+// Questions 4,5,7,8 are reversed (1-indexed) → 0-indexed: 3,4,6,7
+const REVERSED_QUESTIONS = [3, 4, 6, 7];
+
+// ── Score Helpers ──────────────────────────────────────────
+const calculateScore = (questionIndex, answer) => {
+  if (REVERSED_QUESTIONS.includes(questionIndex)) {
+    return 4 - answer; // reverse: 0→4, 1→3, 2→2, 3→1, 4→0
+  }
+  return answer; // normal: score = answer as-is
+};
+
+// ── Answer Text → Number (0-4) ─────────────────────────────
+const parseAnswerToValue = (text) => {
+  const cleaned = text.toLowerCase().trim();
+
+  // Direct number match
+  if (cleaned === "0") return 0;
+  if (cleaned === "1") return 1;
+  if (cleaned === "2") return 2;
+  if (cleaned === "3") return 3;
+  if (cleaned === "4") return 4;
+
+  // Text match — check "almost never" before "never" to avoid partial match
+  if (cleaned.includes("almost never")) return 1;
+  if (cleaned.includes("never"))        return 0;
+  if (cleaned.includes("sometimes"))    return 2;
+  if (cleaned.includes("fairly often")) return 3;
+  if (cleaned.includes("very often"))   return 4;
+
+  return null; // couldn't parse
+};
+
+// ── SVG Icons ──────────────────────────────────────────────
 function SpeakerIcon({ size = 16 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -61,7 +93,7 @@ function StopIcon({ size = 14 }) {
   );
 }
 
-// ── Helper: call backend /api/sarvam/tts → play audio ──
+// ── TTS Helper ─────────────────────────────────────────────
 async function speakText(text) {
   const res = await fetch("/api/sarvam/tts", {
     method: "POST",
@@ -86,7 +118,7 @@ async function speakText(text) {
   });
 }
 
-// ── Component ──
+// ── Component ──────────────────────────────────────────────
 export default function Quizpage() {
   const [responses, setResponses] = useState({});
   const [current, setCurrent] = useState(0);
@@ -102,6 +134,11 @@ export default function Quizpage() {
   const streamRef = useRef(null);
 
   const [error, setError] = useState("");
+
+  // ── Submit state ──
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [submitResult, setSubmitResult] = useState(null); // { total_score, attemptId }
 
   const answered = Object.keys(responses).filter((k) => responses[k].trim() !== "").length;
   const progress = ((current + 1) / questions.length) * 100;
@@ -135,7 +172,7 @@ export default function Quizpage() {
 
   const showError = (msg) => {
     setError(msg);
-    setTimeout(() => setError(""), 4000);
+    setTimeout(() => setError(""), 5000);
   };
 
   // ── TTS: Question ──
@@ -247,14 +284,116 @@ export default function Quizpage() {
     else startListening();
   };
 
-  // ── Render ──
+  // ── Submit ─────────────────────────────────────────────────
+  const handleSubmit = async () => {
+    // Step 1: Parse all 10 text responses into numbers
+    const responsesArray = [];
+    for (let i = 0; i < questions.length; i++) {
+      const rawText = (responses[i] || "").trim();
+      const value = parseAnswerToValue(rawText);
+
+      if (value === null) {
+        showError(
+          `Question ${i + 1}: "${rawText}" is not a valid answer. Please type or say: Never, Almost Never, Sometimes, Fairly Often, or Very Often.`
+        );
+        setCurrent(i); // jump to the problematic question
+        return;
+      }
+
+      responsesArray.push({
+        question_id: i + 1,         // 1-indexed for DB
+        answer: value,              // 0-4 numeric answer
+        score: calculateScore(i, value), // reversed for Q4,5,7,8
+      });
+    }
+
+    // Step 2: Sum all scores → total
+    const totalScore = responsesArray.reduce((sum, r) => sum + r.score, 0);
+
+    // Step 3: Send to Express backend
+    try {
+      setSubmitting(true);
+      const res = await fetch("/api/quiz/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include", // sends session cookie → backend knows who user is
+        body: JSON.stringify({
+          responses: responsesArray,
+          total_score: totalScore,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        setSubmitResult({ total_score: totalScore, attemptId: data.attemptId });
+        setSubmitted(true);
+      } else {
+        showError(data.error || "Submission failed. Please try again.");
+      }
+    } catch (err) {
+      console.error(err);
+      showError("Network error. Please check your connection and try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // ── Stress Level Label ──
+  const getStressLabel = (score) => {
+    if (score <= 13) return { label: "Low Stress", color: "text-green-600", bg: "bg-green-50 border-green-200" };
+    if (score <= 26) return { label: "Moderate Stress", color: "text-amber-600", bg: "bg-amber-50 border-amber-200" };
+    return { label: "High Stress", color: "text-red-600", bg: "bg-red-50 border-red-200" };
+  };
+
+  // ── Success Screen ─────────────────────────────────────────
+  if (submitted && submitResult) {
+    const stress = getStressLabel(submitResult.total_score);
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-teal-50/30 to-cyan-50/40 flex items-center justify-center px-5 font-['Outfit',_sans-serif]">
+        <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&display=swap" rel="stylesheet" />
+        <div className="w-full max-w-md bg-white rounded-3xl shadow-xl border border-teal-100/50 p-10 text-center">
+          {/* Checkmark */}
+          <div className="w-16 h-16 rounded-full bg-gradient-to-br from-teal-500 to-cyan-600 flex items-center justify-center mx-auto mb-6 shadow-lg shadow-teal-200/50">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          </div>
+
+          <h2 className="text-2xl font-bold text-slate-800 mb-2 font-['Fraunces',_serif]">Quiz Submitted!</h2>
+          <p className="text-slate-400 text-sm mb-8">Your responses have been saved successfully.</p>
+
+          {/* Score */}
+          <div className="bg-slate-50 rounded-2xl p-6 mb-4 border border-slate-100">
+            <p className="text-xs text-slate-400 uppercase tracking-widest mb-2">Your PSS-10 Score</p>
+            <p className="text-5xl font-bold text-slate-800 mb-1">{submitResult.total_score}</p>
+            <p className="text-xs text-slate-400">out of 40</p>
+          </div>
+
+          {/* Stress Level */}
+          <div className={`rounded-2xl px-6 py-4 border ${stress.bg}`}>
+            <p className={`text-lg font-semibold ${stress.color}`}>{stress.label}</p>
+            <p className="text-xs text-slate-400 mt-1">
+              {submitResult.total_score <= 13
+                ? "Scores 0–13 indicate low perceived stress."
+                : submitResult.total_score <= 26
+                ? "Scores 14–26 indicate moderate perceived stress."
+                : "Scores 27–40 indicate high perceived stress."}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Main Quiz Render ───────────────────────────────────────
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-teal-50/30 to-cyan-50/40 flex flex-col font-['Outfit',_sans-serif]">
       <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&display=swap" rel="stylesheet" />
 
       {/* Error Toast */}
       {error && (
-        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-xl bg-red-50 border border-red-200 text-red-600 text-sm font-medium shadow-lg animate-bounce">
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-xl bg-red-50 border border-red-200 text-red-600 text-sm font-medium shadow-lg max-w-sm text-center">
           {error}
         </div>
       )}
@@ -307,7 +446,7 @@ export default function Quizpage() {
           {/* Card */}
           <div key={current} className="bg-white rounded-3xl shadow-xl shadow-teal-100/30 border border-teal-100/50 overflow-hidden transition-all duration-300">
 
-            {/* ── QUESTION SECTION ── */}
+            {/* QUESTION SECTION */}
             <div className="px-7 pt-7 pb-5">
               <div className="flex items-center gap-3 mb-4">
                 <span className="inline-flex items-center justify-center w-10 h-10 rounded-2xl bg-gradient-to-br from-teal-500 to-cyan-600 text-white font-bold text-sm shadow-lg shadow-teal-200/40">
@@ -320,46 +459,36 @@ export default function Quizpage() {
                 {questions[current]}
               </p>
 
-              {/* 🔊 Listen to Question */}
               <button
                 onClick={handleTTSQuestion}
                 disabled={playingQuestion}
-                className={`
-                  inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 border
-                  ${playingQuestion
+                className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 border ${
+                  playingQuestion
                     ? "bg-teal-500 text-white border-teal-500 shadow-lg shadow-teal-200/50 cursor-wait"
                     : "bg-teal-50 text-teal-600 border-teal-200/60 hover:bg-teal-100 hover:border-teal-300"
-                  }
-                `}
+                }`}
               >
-                <span className={playingQuestion ? "animate-pulse" : ""}>
-                  <SpeakerIcon size={15} />
-                </span>
+                <span className={playingQuestion ? "animate-pulse" : ""}><SpeakerIcon size={15} /></span>
                 {playingQuestion ? "Playing Question…" : "Listen to Question"}
               </button>
             </div>
 
-            {/* Divider */}
             <div className="mx-7 h-px bg-gradient-to-r from-transparent via-teal-200/50 to-transparent" />
 
-            {/* ── OPTIONS SECTION ── */}
+            {/* OPTIONS SECTION */}
             <div className="px-7 pt-5 pb-0">
               <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
                 <p className="text-xs text-slate-400 font-medium uppercase tracking-widest">Response Options</p>
                 <button
                   onClick={handleTTSOptions}
                   disabled={playingOptions}
-                  className={`
-                    inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 border
-                    ${playingOptions
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 border ${
+                    playingOptions
                       ? "bg-indigo-500 text-white border-indigo-500 shadow-md shadow-indigo-200/50 cursor-wait"
                       : "bg-indigo-50 text-indigo-500 border-indigo-200/60 hover:bg-indigo-100 hover:border-indigo-300"
-                    }
-                  `}
+                  }`}
                 >
-                  <span className={playingOptions ? "animate-pulse" : ""}>
-                    <SpeakerIcon size={13} />
-                  </span>
+                  <span className={playingOptions ? "animate-pulse" : ""}><SpeakerIcon size={13} /></span>
                   {playingOptions ? "Playing…" : "Listen to Options"}
                 </button>
               </div>
@@ -374,27 +503,23 @@ export default function Quizpage() {
               </div>
             </div>
 
-            {/* Divider */}
             <div className="mx-7 mt-4 h-px bg-gradient-to-r from-transparent via-slate-200/50 to-transparent" />
 
-            {/* ── YOUR ANSWER ── */}
+            {/* YOUR ANSWER */}
             <div className="px-7 pt-5 pb-7">
               <div className="flex items-center justify-between mb-3 flex-wrap gap-3">
                 <p className="text-xs text-slate-400 font-medium uppercase tracking-widest">Your Answer</p>
 
-                {/* 🎤 Speak Answer */}
                 <button
                   onClick={toggleSTT}
                   disabled={sttLoading}
-                  className={`
-                    inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 border
-                    ${sttLoading
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 border ${
+                    sttLoading
                       ? "bg-amber-50 text-amber-600 border-amber-200 cursor-wait"
                       : isListening
                         ? "bg-rose-500 text-white border-rose-500 shadow-md shadow-rose-200/50 animate-pulse"
                         : "bg-rose-50 text-rose-500 border-rose-200/60 hover:bg-rose-100 hover:border-rose-300"
-                    }
-                  `}
+                  }`}
                 >
                   {sttLoading ? (
                     <>
@@ -429,7 +554,7 @@ export default function Quizpage() {
                 <textarea
                   value={responses[current] || ""}
                   onChange={(e) => handleInputChange(e.target.value)}
-                  placeholder="Type your response here or click 'Speak Answer' to use your voice…"
+                  placeholder="Say or type: Never / Almost Never / Sometimes / Fairly Often / Very Often"
                   rows={3}
                   className="w-full px-5 py-4 rounded-2xl bg-slate-50/80 border border-slate-200/70 text-sm text-slate-700 placeholder-slate-300 leading-relaxed resize-none transition-all duration-200 focus:outline-none focus:border-teal-300 focus:ring-2 focus:ring-teal-100 focus:bg-white font-['Outfit',_sans-serif]"
                 />
@@ -443,6 +568,20 @@ export default function Quizpage() {
                   </div>
                 )}
               </div>
+
+              {/* Live parsed value preview */}
+              {responses[current] && responses[current].trim() !== "" && (() => {
+                const val = parseAnswerToValue(responses[current]);
+                return val !== null ? (
+                  <p className="mt-2 text-xs text-teal-600 font-medium">
+                    ✓ Parsed as: <span className="font-bold">{options[val]}</span> (score: {val})
+                  </p>
+                ) : (
+                  <p className="mt-2 text-xs text-red-500 font-medium">
+                    ✗ Not recognized. Say: Never / Almost Never / Sometimes / Fairly Often / Very Often
+                  </p>
+                );
+              })()}
             </div>
           </div>
 
@@ -459,12 +598,16 @@ export default function Quizpage() {
             </button>
 
             {isLast ? (
-              <button className={`flex items-center gap-2 px-7 py-3 rounded-xl text-sm font-bold transition-all duration-300 ${
-                answered === questions.length
-                  ? "bg-gradient-to-r from-teal-500 to-cyan-600 text-white shadow-lg shadow-teal-200/50 hover:shadow-xl hover:scale-105"
-                  : "bg-slate-100 text-slate-400 cursor-not-allowed"
-              }`}>
-                Submit
+              <button
+                onClick={handleSubmit}
+                disabled={answered !== questions.length || submitting}
+                className={`flex items-center gap-2 px-7 py-3 rounded-xl text-sm font-bold transition-all duration-300 ${
+                  answered === questions.length && !submitting
+                    ? "bg-gradient-to-r from-teal-500 to-cyan-600 text-white shadow-lg shadow-teal-200/50 hover:shadow-xl hover:scale-105"
+                    : "bg-slate-100 text-slate-400 cursor-not-allowed"
+                }`}
+              >
+                {submitting ? "Submitting..." : "Submit"}
               </button>
             ) : (
               <button onClick={goNext} className="flex items-center gap-2 px-5 py-3 rounded-xl text-sm font-semibold text-teal-600 hover:bg-white/80 hover:shadow-sm transition-all duration-200">
