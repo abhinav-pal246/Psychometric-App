@@ -93,16 +93,21 @@ function StopIcon({ size = 14 }) {
   );
 }
 
-// ── TTS Helper (returns audio element so it can be stopped) ──
-async function speakText(text, audioRef) {
+// ── TTS Helper with AbortController support ──
+// signal: AbortSignal — cancels the fetch AND stops playback
+async function speakText(text, audioRef, signal) {
   const res = await fetch("/api/sarvam/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
+    signal,
   });
   if (!res.ok) throw new Error("TTS request failed");
   const data = await res.json();
   if (!data.audio) throw new Error("No audio returned");
+
+  // Check if aborted during JSON parse
+  if (signal && signal.aborted) return;
 
   const raw = atob(data.audio);
   const bytes = new Uint8Array(raw.length);
@@ -114,9 +119,23 @@ async function speakText(text, audioRef) {
   if (audioRef) audioRef.current = audio;
 
   return new Promise((resolve) => {
-    audio.onended = () => { URL.revokeObjectURL(url); if (audioRef) audioRef.current = null; resolve(); };
-    audio.onerror = () => { URL.revokeObjectURL(url); if (audioRef) audioRef.current = null; resolve(); };
+    const cleanup = () => { URL.revokeObjectURL(url); if (audioRef) audioRef.current = null; resolve(); };
+
+    // If already aborted before play, don't play
+    if (signal && signal.aborted) { cleanup(); return; }
+
+    audio.onended = cleanup;
+    audio.onerror = cleanup;
     audio.play();
+
+    // Listen for abort to stop mid-playback
+    if (signal) {
+      signal.addEventListener("abort", () => {
+        audio.pause();
+        audio.currentTime = 0;
+        cleanup();
+      }, { once: true });
+    }
   });
 }
 
@@ -155,13 +174,17 @@ export default function Quizpage() {
   // ── Audio ref for stopping TTS ──
   const ttsAudioRef = useRef(null);
 
+  // ── AbortController for cancelling in-flight TTS fetches + playback ──
+  const abortControllerRef = useRef(null);
+
   // ── Click detection refs ──
   const clickCountRef = useRef(0);
   const clickTimerRef = useRef(null);
 
-  // ── Track if question announcement is in progress ──
-  const announcementRef = useRef(null);
   const prevQuestionRef = useRef(current);
+
+  // ── Track if TTS sequence is active (UI state for toggle) ──
+  const ttsActiveRef = useRef(false);
 
   const answered = Object.keys(responses).filter((k) => responses[k].trim() !== "").length;
   const progress = ((current + 1) / questions.length) * 100;
@@ -184,13 +207,31 @@ export default function Quizpage() {
     setIsListening(false);
   };
 
-  const resetAudio = () => {
+  // ── Cancel all in-flight fetches + playing audio + recording ──
+  const cancelAll = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    ttsActiveRef.current = false;
+    stopTTS(ttsAudioRef);
+    setIsTTSPlaying(false);
     setPlayingQuestion(false);
     setPlayingOptions(false);
-    setIsTTSPlaying(false);
-    stopTTS(ttsAudioRef);
     stopRecordingSilently();
   };
+
+  // ── Get a fresh AbortSignal (cancels any previous one first) ──
+  const newSignal = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    return controller.signal;
+  };
+
+  const resetAudio = cancelAll;
 
   const goNext = useCallback(() => {
     setCurrent((prev) => {
@@ -232,8 +273,8 @@ export default function Quizpage() {
     prevQuestionRef.current = current;
 
     const announceQuestion = async () => {
-      // Stop any ongoing TTS
-      stopTTS(ttsAudioRef);
+      // Cancel any ongoing TTS (including in-flight fetches)
+      cancelAll();
 
       let announcement;
       if (current === questions.length - 1) {
@@ -242,10 +283,11 @@ export default function Quizpage() {
         announcement = `Question ${current + 1}.`;
       }
 
+      const signal = newSignal();
       try {
-        await speakText(announcement, ttsAudioRef);
+        await speakText(announcement, ttsAudioRef, signal);
       } catch (err) {
-        console.error("Question announcement failed:", err);
+        if (err.name !== "AbortError") console.error("Question announcement failed:", err);
       }
     };
 
@@ -277,93 +319,105 @@ export default function Quizpage() {
   // FEATURE 3: Single click → TTS read question+options+answer / stop if playing
   // FEATURE 4: Double click → STT to take voice answer
   // FEATURE 5: Triple click → Clear the submitted answer
+  // Clicks are detected on the ENTIRE window via window event listener.
   // ══════════════════════════════════════════════════════════
-  const handleCardClick = useCallback((e) => {
-    // Don't trigger on button clicks, textarea, or interactive elements
-    if (
-      e.target.tagName === "BUTTON" ||
-      e.target.tagName === "TEXTAREA" ||
-      e.target.tagName === "INPUT" ||
-      e.target.tagName === "SVG" ||
-      e.target.tagName === "path" ||
-      e.target.tagName === "polyline" ||
-      e.target.tagName === "rect" ||
-      e.target.tagName === "polygon" ||
-      e.target.tagName === "line" ||
-      e.target.tagName === "circle" ||
-      e.target.closest("button") ||
-      e.target.closest("textarea")
-    ) {
-      return;
-    }
 
-    clickCountRef.current += 1;
+  // Store latest state in refs so the window click handler always reads fresh values
+  const currentRef = useRef(current);
+  const responsesRef = useRef(responses);
+  currentRef.current = current;
+  responsesRef.current = responses;
 
-    if (clickTimerRef.current) {
-      clearTimeout(clickTimerRef.current);
-    }
-
-    clickTimerRef.current = setTimeout(() => {
-      const clicks = clickCountRef.current;
-      clickCountRef.current = 0;
-
-      if (clicks === 1) {
-        handleSingleClick();
-      } else if (clicks === 2) {
-        handleDoubleClick();
-      } else if (clicks >= 3) {
-        handleTripleClick();
+  useEffect(() => {
+    const handleWindowClick = (e) => {
+      // Don't trigger on button clicks, textarea, or interactive elements
+      if (
+        e.target.tagName === "BUTTON" ||
+        e.target.tagName === "TEXTAREA" ||
+        e.target.tagName === "INPUT" ||
+        e.target.closest("button") ||
+        e.target.closest("textarea")
+      ) {
+        return;
       }
-    }, 350);
-  }, [current, responses, isTTSPlaying, isListening]);
+
+      clickCountRef.current += 1;
+
+      if (clickTimerRef.current) {
+        clearTimeout(clickTimerRef.current);
+      }
+
+      clickTimerRef.current = setTimeout(() => {
+        const clicks = clickCountRef.current;
+        clickCountRef.current = 0;
+
+        if (clicks === 1) {
+          handleSingleClick();
+        } else if (clicks === 2) {
+          handleDoubleClick();
+        } else if (clicks >= 3) {
+          handleTripleClick();
+        }
+      }, 350);
+    };
+
+    window.addEventListener("click", handleWindowClick);
+    return () => window.removeEventListener("click", handleWindowClick);
+  }, []); // empty deps — uses refs for fresh state
 
   // ── SINGLE CLICK: Read question + options + user's answer via TTS / Stop if playing ──
   const handleSingleClick = async () => {
-    // If TTS is currently playing, stop it
-    if (ttsAudioRef.current) {
-      stopTTS(ttsAudioRef);
-      setIsTTSPlaying(false);
-      setPlayingQuestion(false);
-      setPlayingOptions(false);
+    // If TTS is currently active (playing or fetching), just stop everything
+    if (ttsActiveRef.current) {
+      cancelAll();
       return;
     }
 
+    // Stop any other ongoing task first (STT, recording, in-flight fetches)
+    cancelAll();
+
+    // Start TTS sequence with a fresh abort signal
+    const signal = newSignal();
+    ttsActiveRef.current = true;
     setIsTTSPlaying(true);
     setPlayingQuestion(true);
 
+    const cur = currentRef.current;
+
     try {
       // Read question
-      await speakText(`Question ${current + 1}. ${questions[current]}`, ttsAudioRef);
-
-      // Check if stopped mid-way
-      if (!ttsAudioRef.current && !document.hidden) {
-        // Audio finished naturally, continue to options
-      }
+      await speakText(`Question ${cur + 1}. ${questions[cur]}`, ttsAudioRef, signal);
+      if (signal.aborted) return;
 
       setPlayingQuestion(false);
       setPlayingOptions(true);
 
       // Read options
       const optionsText = options.map((o, i) => `Option ${i}: ${o}`).join(". ");
-      await speakText(optionsText, ttsAudioRef);
+      await speakText(optionsText, ttsAudioRef, signal);
+      if (signal.aborted) return;
 
       setPlayingOptions(false);
 
       // Read user's answer if they have one
-      const userAnswer = responses[current];
+      const userAnswer = responsesRef.current[cur];
       if (userAnswer && userAnswer.trim() !== "") {
         const parsed = parseAnswerToValue(userAnswer);
         if (parsed !== null) {
-          await speakText(`Your answer is: ${options[parsed]}`, ttsAudioRef);
+          await speakText(`Your answer is: ${options[parsed]}`, ttsAudioRef, signal);
         } else {
-          await speakText(`Your current answer is: ${userAnswer}`, ttsAudioRef);
+          await speakText(`Your current answer is: ${userAnswer}`, ttsAudioRef, signal);
         }
+        if (signal.aborted) return;
       }
     } catch (err) {
-      console.error("TTS error:", err);
-      showError("Failed to play audio.");
+      if (err.name !== "AbortError") {
+        console.error("TTS error:", err);
+        if (ttsActiveRef.current) showError("Failed to play audio.");
+      }
     }
 
+    ttsActiveRef.current = false;
     setIsTTSPlaying(false);
     setPlayingQuestion(false);
     setPlayingOptions(false);
@@ -371,14 +425,8 @@ export default function Quizpage() {
 
   // ── DOUBLE CLICK: Start STT, auto-stop on valid answer, reset on invalid ──
   const handleDoubleClick = async () => {
-    // If already listening, ignore
-    if (isListening || sttLoading) return;
-
-    // Stop any TTS
-    stopTTS(ttsAudioRef);
-    setIsTTSPlaying(false);
-    setPlayingQuestion(false);
-    setPlayingOptions(false);
+    // Stop everything first (TTS, any previous recording, in-flight fetches)
+    cancelAll();
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -421,6 +469,8 @@ export default function Quizpage() {
     setIsListening(false);
     setSttLoading(true);
 
+    const cur = currentRef.current;
+
     try {
       const blob = await new Promise((resolve) => {
         mediaRecorderRef.current.onstop = () => {
@@ -451,18 +501,25 @@ export default function Quizpage() {
         const parsed = parseAnswerToValue(transcript);
 
         if (parsed !== null) {
-          // Valid answer — set it and stop
-          setResponses((prev) => ({ ...prev, [current]: options[parsed] }));
-          // Announce confirmation
+          setResponses((prev) => ({ ...prev, [cur]: options[parsed] }));
+          const signal = newSignal();
+          ttsActiveRef.current = true;
           try {
-            await speakText(`Answer recorded: ${options[parsed]}`, ttsAudioRef);
-          } catch {}
+            await speakText(`Answer recorded: ${options[parsed]}`, ttsAudioRef, signal);
+          } catch (err) {
+            if (err.name !== "AbortError") console.error(err);
+          }
+          ttsActiveRef.current = false;
         } else {
-          // Invalid answer — reset and announce error
-          setResponses((prev) => ({ ...prev, [current]: "" }));
+          setResponses((prev) => ({ ...prev, [cur]: "" }));
+          const signal = newSignal();
+          ttsActiveRef.current = true;
           try {
-            await speakText("Answer was not from the following options. Please try answering again.", ttsAudioRef);
-          } catch {}
+            await speakText("Answer was not from the following options. Please try answering again.", ttsAudioRef, signal);
+          } catch (err) {
+            if (err.name !== "AbortError") console.error(err);
+          }
+          ttsActiveRef.current = false;
         }
       }
     } catch (err) {
@@ -475,50 +532,57 @@ export default function Quizpage() {
 
   // ── TRIPLE CLICK: Clear the submitted answer ──
   const handleTripleClick = async () => {
-    setResponses((prev) => ({ ...prev, [current]: "" }));
+    // Stop everything first
+    cancelAll();
 
-    // Stop any ongoing audio/recording
-    stopTTS(ttsAudioRef);
-    setIsTTSPlaying(false);
-    stopRecordingSilently();
+    setResponses((prev) => ({ ...prev, [currentRef.current]: "" }));
 
     // Announce that the answer has been cleared
+    const signal = newSignal();
+    ttsActiveRef.current = true;
     try {
-      await speakText("Answer cleared.", ttsAudioRef);
-    } catch {}
+      await speakText("Answer cleared.", ttsAudioRef, signal);
+    } catch (err) {
+      if (err.name !== "AbortError") console.error(err);
+    }
+    ttsActiveRef.current = false;
   };
 
   // ── TTS: Question (button) ──
   const handleTTSQuestion = async () => {
     if (playingQuestion) return;
+    cancelAll();
+    const signal = newSignal();
     setPlayingQuestion(true);
-    setPlayingOptions(false);
     setIsTTSPlaying(true);
+    ttsActiveRef.current = true;
     try {
-      await speakText(questions[current], ttsAudioRef);
+      await speakText(questions[current], ttsAudioRef, signal);
     } catch (err) {
-      console.error(err);
-      showError("Failed to play question audio.");
+      if (err.name !== "AbortError") { console.error(err); showError("Failed to play question audio."); }
     }
     setPlayingQuestion(false);
     setIsTTSPlaying(false);
+    ttsActiveRef.current = false;
   };
 
   // ── TTS: Options (button) ──
   const handleTTSOptions = async () => {
     if (playingOptions) return;
+    cancelAll();
+    const signal = newSignal();
     setPlayingOptions(true);
-    setPlayingQuestion(false);
     setIsTTSPlaying(true);
+    ttsActiveRef.current = true;
     try {
       const text = options.map((o, i) => `Option ${i}: ${o}`).join(". ");
-      await speakText(text, ttsAudioRef);
+      await speakText(text, ttsAudioRef, signal);
     } catch (err) {
-      console.error(err);
-      showError("Failed to play options audio.");
+      if (err.name !== "AbortError") { console.error(err); showError("Failed to play options audio."); }
     }
     setPlayingOptions(false);
     setIsTTSPlaying(false);
+    ttsActiveRef.current = false;
   };
 
   // ── STT: Toggle (button) ──
@@ -769,7 +833,6 @@ export default function Quizpage() {
           {/* Card — click handler for single/double/triple click */}
           <div
             key={current}
-            onClick={handleCardClick}
             className="bg-white rounded-3xl shadow-xl shadow-teal-100/30 border border-teal-100/50 overflow-hidden transition-all duration-300 cursor-pointer select-none"
             role="region"
             aria-label={`Question ${current + 1} of ${questions.length}`}
